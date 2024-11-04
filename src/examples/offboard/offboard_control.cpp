@@ -44,23 +44,32 @@
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
+#include <thread>
 
 #include <chrono>
 #include <iostream>
+#include <unistd.h>
 
 using namespace std::chrono;
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
 
+double drone_x = 0.0;
+double drone_y = 0.0;
+double drone_z = -5.0; // Start at 5 meters altitude (negative for down in ROS)
+
 class OffboardControl : public rclcpp::Node
 {
 public:
-	OffboardControl() : Node("offboard_control")
+	OffboardControl() : Node("offboard_control"), running_(true)
 	{
-
+		// offboard_control_node_ = std::make_shared<OffboardControl>();
 		offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
 		trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
 		vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
+
+        // Start a thread to handle keyboard input
+        input_thread_ = std::thread(&OffboardControl::inputLoop, this);
 
 		offboard_setpoint_counter_ = 0;
 
@@ -75,8 +84,8 @@ public:
 			}
 
 			// offboard_control_mode needs to be paired with trajectory_setpoint
-			publish_offboard_control_mode();
-			publish_trajectory_setpoint();
+			publish_offboard_control_mode(); // Always call
+			// publish_trajectory_setpoint();
 
 			// stop the counter after reaching 11
 			if (offboard_setpoint_counter_ < 11) {
@@ -86,10 +95,60 @@ public:
 		timer_ = this->create_wall_timer(100ms, timer_callback);
 	}
 
+    ~OffboardControl() {
+        running_ = false; // Stop the input loop
+        if (input_thread_.joinable()) {
+            input_thread_.join(); // Wait for the input thread to finish
+        }
+    }
+
+    void inputLoop() {
+        while (running_) {
+            char command;
+            std::cout << "Enter command (r=arm, w=up, s=down, a=left, d=right, l=RTL, q=quit): " << std::endl;
+            std::cin >> command;
+
+            switch (command) {
+                case 'r':
+					publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
+                    arm();
+                    break;
+                case 'w':
+					drone_x-=1;
+					publish_trajectory_setpoint();
+                    break;
+                case 's':
+					drone_x+=1;
+					publish_trajectory_setpoint();
+                    break;
+                case 'a':
+					drone_y-=1;
+					publish_trajectory_setpoint();
+                    break;
+                case 'd':
+					drone_y+=1;
+					publish_trajectory_setpoint();
+                    break;
+                case 'l':
+					publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 4, 5);
+                    break;
+                case 'q':
+                    running_ = false; // Exit the loop
+                    break;
+                default:
+                    std::cout << "Invalid command." << std::endl;
+            }
+        }
+    }
+
 	void arm();
 	void disarm();
 
 private:
+	std::shared_ptr<OffboardControl> offboard_control_node_;
+    std::thread input_thread_;
+    std::atomic<bool> running_; // Control flag for the input loop
+
 	rclcpp::TimerBase::SharedPtr timer_;
 
 	rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
@@ -102,7 +161,7 @@ private:
 
 	void publish_offboard_control_mode();
 	void publish_trajectory_setpoint();
-	void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
+	void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0, float param3 = 0.0);
 };
 
 /**
@@ -148,8 +207,9 @@ void OffboardControl::publish_offboard_control_mode()
  */
 void OffboardControl::publish_trajectory_setpoint()
 {
+	// printf("is calles\n");
 	TrajectorySetpoint msg{};
-	msg.position = {0.0, 0.0, -5.0};
+	msg.position = {drone_x, drone_y, -5.0};
 	msg.yaw = -3.14; // [-PI:PI]
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 	trajectory_setpoint_publisher_->publish(msg);
@@ -161,11 +221,12 @@ void OffboardControl::publish_trajectory_setpoint()
  * @param param1    Command parameter 1
  * @param param2    Command parameter 2
  */
-void OffboardControl::publish_vehicle_command(uint16_t command, float param1, float param2)
+void OffboardControl::publish_vehicle_command(uint16_t command, float param1, float param2, float param3)
 {
 	VehicleCommand msg{};
 	msg.param1 = param1;
 	msg.param2 = param2;
+	msg.param3 = param3;
 	msg.command = command;
 	msg.target_system = 1;
 	msg.target_component = 1;
