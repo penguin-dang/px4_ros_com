@@ -49,14 +49,21 @@
 #include <chrono>
 #include <iostream>
 #include <unistd.h>
+#include <termios.h> // For custom getch()
 
 using namespace std::chrono;
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
 
+#define USE_POSITION;
+
 double drone_x = 0.0;
 double drone_y = 0.0;
-double drone_z = -5.0; // Start at 5 meters altitude (negative for down in ROS)
+double drone_z = -3.0; // Start at 3 meters altitude (negative for down in ROS)
+double drone_yaw = 0.0;
+double velocity = 1.0;
+bool tookOff = false;
+bool armed = false;
 
 class OffboardControl : public rclcpp::Node
 {
@@ -75,22 +82,22 @@ public:
 
 		auto timer_callback = [this]() -> void {
 
-			if (offboard_setpoint_counter_ == 10) {
-				// Change to Offboard mode after 10 setpoints
-				this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
+			// if (offboard_setpoint_counter_ == 10) {
+			// 	// Change to Offboard mode after 10 setpoints
+			// 	this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
 
-				// Arm the vehicle
-				this->arm();
-			}
+			// 	// Arm the vehicle
+			// 	this->arm();
+			// }
 
 			// offboard_control_mode needs to be paired with trajectory_setpoint
 			publish_offboard_control_mode(); // Always call
 			// publish_trajectory_setpoint();
 
 			// stop the counter after reaching 11
-			if (offboard_setpoint_counter_ < 11) {
-				offboard_setpoint_counter_++;
-			}
+			// if (offboard_setpoint_counter_ < 11) {
+			// 	offboard_setpoint_counter_++;
+			// }
 		};
 		timer_ = this->create_wall_timer(100ms, timer_callback);
 	}
@@ -103,34 +110,122 @@ public:
     }
 
     void inputLoop() {
+		std::cout << "---------------------------" << std::endl;
+		std::cout << "Left wheel - gas & heading" << std::endl;
+		std::cout << "        w     " << std::endl;
+		std::cout << "   a    s    d" << std::endl;
+		std::cout << std::endl;
+		std::cout << "Right wheel - move" << std::endl;
+		std::cout << "---------------------------" << std::endl;
+		std::cout << "        i     " << std::endl;
+		std::cout << "   j    k    l" << std::endl;
+		std::cout << std::endl;
+		std::cout << "f/h : arm/disarm" << std::endl;
+		std::cout << "t   : RTL" << std::endl;
+		std::cout << std::endl;
+		std::cout << "x/z : increase/decrease max speeds by 10%" << std::endl;
+		std::cout << std::endl;
+		std::cout << "q to quit" << std::endl;
         while (running_) {
-            char command;
-            std::cout << "Enter command (r=arm, w=up, s=down, a=left, d=right, l=RTL, q=quit): " << std::endl;
-            std::cin >> command;
-
+			usleep(100000);
+            char command = getch();
             switch (command) {
-                case 'r':
+                case 'f':
 					publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
                     arm();
+					armed = true;
+                    break;
+                case 'h':
+                    disarm();
+					tookOff = false;
+					armed = false;
                     break;
                 case 'w':
-					drone_x-=1;
+					if (!armed) break;
+					tookOff = true;
+					#ifdef USE_POSITION
+						drone_z-=velocity;
+					#else
+						drone_z=-velocity;
+					#endif
 					publish_trajectory_setpoint();
                     break;
                 case 's':
-					drone_x+=1;
+					if (!tookOff) break;
+					#ifdef USE_POSITION
+						drone_z+=velocity;
+					#else
+						drone_z=+velocity;
+					#endif
 					publish_trajectory_setpoint();
                     break;
                 case 'a':
-					drone_y-=1;
+					if (!tookOff) break;
+					#ifdef USE_POSITION
+						drone_yaw-=velocity/10.0;
+					#else
+						drone_yaw=-velocity/10.0;
+					#endif
 					publish_trajectory_setpoint();
                     break;
                 case 'd':
-					drone_y+=1;
+					if (!tookOff) break;
+					#ifdef USE_POSITION
+						drone_yaw+=velocity/10.0;
+					#else
+						drone_yaw=+velocity/10.0;
+					#endif
+					publish_trajectory_setpoint();
+                    break;
+                case 'i':
+					tookOff = true;
+					#ifdef USE_POSITION
+						drone_x-=velocity;
+					#else
+						drone_x=-velocity;
+					#endif
+					publish_trajectory_setpoint();
+                    break;
+                case 'k':
+					if (!tookOff) break;
+					#ifdef USE_POSITION
+						drone_x+=velocity;
+					#else
+						drone_x=+velocity;
+					#endif
+					publish_trajectory_setpoint();
+                    break;
+                case 'j':
+					if (!tookOff) break;
+					#ifdef USE_POSITION
+						drone_y-=velocity;
+					#else
+						drone_y=-velocity;
+					#endif
 					publish_trajectory_setpoint();
                     break;
                 case 'l':
+					if (!tookOff) break;
+					#ifdef USE_POSITION
+						drone_y+=velocity;
+					#else
+						drone_y=+velocity;
+					#endif
+					publish_trajectory_setpoint();
+                    break;
+                case 'z':
+					velocity*=0.9;
+					std::cout << "velocity = " << velocity << std::endl;
+                    break;
+                case 'x':
+					velocity/=0.9;
+					std::cout << "velocity = " << velocity << std::endl;
+                    break;
+                case 't':
+					if (!tookOff) break;
 					publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 4, 5);
+					tookOff = false;
+					armed = false;
                     break;
                 case 'q':
                     running_ = false; // Exit the loop
@@ -139,6 +234,27 @@ public:
                     std::cout << "Invalid command." << std::endl;
             }
         }
+    }
+
+    // Function to capture a single character input without Enter
+    char getch() {
+        char buf = 0;
+        struct termios old = {0};
+        if (tcgetattr(0, &old) < 0)
+            perror("tcsetattr()");
+        old.c_lflag &= ~ICANON;
+        old.c_lflag &= ~ECHO;
+        old.c_cc[VMIN] = 1;
+        old.c_cc[VTIME] = 0;
+        if (tcsetattr(0, TCSANOW, &old) < 0)
+            perror("tcsetattr ICANON");
+        if (read(0, &buf, 1) < 0)
+            perror("read()");
+        old.c_lflag |= ICANON;
+        old.c_lflag |= ECHO;
+        if (tcsetattr(0, TCSADRAIN, &old) < 0)
+            perror("tcsetattr ~ICANON");
+        return buf;
     }
 
 	void arm();
@@ -171,7 +287,7 @@ void OffboardControl::arm()
 {
 	publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0);
 
-	RCLCPP_INFO(this->get_logger(), "Arm command send");
+	// RCLCPP_INFO(this->get_logger(), "Arm command send");
 }
 
 /**
@@ -181,7 +297,7 @@ void OffboardControl::disarm()
 {
 	publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0);
 
-	RCLCPP_INFO(this->get_logger(), "Disarm command send");
+	// RCLCPP_INFO(this->get_logger(), "Disarm command send");
 }
 
 /**
@@ -191,8 +307,8 @@ void OffboardControl::disarm()
 void OffboardControl::publish_offboard_control_mode()
 {
 	OffboardControlMode msg{};
-	msg.position = true;
-	msg.velocity = false;
+	msg.position = false;
+	msg.velocity = true;
 	msg.acceleration = false;
 	msg.attitude = false;
 	msg.body_rate = false;
@@ -209,8 +325,8 @@ void OffboardControl::publish_trajectory_setpoint()
 {
 	// printf("is calles\n");
 	TrajectorySetpoint msg{};
-	msg.position = {drone_x, drone_y, -5.0};
-	msg.yaw = -3.14; // [-PI:PI]
+	msg.position = {drone_x, drone_y, drone_z};
+	msg.yaw = drone_yaw; // [-PI:PI]
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 	trajectory_setpoint_publisher_->publish(msg);
 }
